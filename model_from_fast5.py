@@ -63,7 +63,7 @@ def dump_models(model_params, basename):
     """
 
     for name, model in model_params.items():
-        pickle.dump(model, open(basename + "." + name + ".pickle", 'wb'))
+        pickle.dump(model, open(basename + "." + name + ".pickle", 'wb'), protocol=2)
 
 
 if __name__ == "__main__":
