@@ -6,23 +6,25 @@ import sys
 from npcaller.fasta import FastaWriter
 import numpy as np
 
-class ModelException:
+
+class ModelException(Exception):
     pass
 
+
 class HmmModel(object):
-    TRANSMAT_CONST_MOVE = HmmModel.mk_transmat1
-    TRANSMAT_MOVE_MAX_2 = HmmModel.mk_transmat2
+    TRANSMAT_CONST_MOVE = 0
+    TRANSMAT_MOVE_MAX_2 = 2
     emission_domain = ghmm.Float() # emission domain for HMM
     model = None
 
-    def __init__(self, model_file, f_transmat=HmmModel.TRANSMAT_MOVE_MAX_2):
+    def __init__(self, model_file, which_transmat=TRANSMAT_MOVE_MAX_2):
         self.model_params = pickle.load(model_file)
         self.nmers = len(self.model_params[["kmer"]][0])
         assert 4 ** self.nmers == len(self.model_params), "# model params do not match length of kmers"
         self.nstates = len(self.model_params)
-        self.init_model(f_transmat)
+        self.init_model(which_transmat)
 
-    def init_model(self, f_transmat):
+    def init_model(self, which_transmat):
         """
         Build a HMM according to the parameter File.
 
@@ -33,13 +35,16 @@ class HmmModel(object):
 
         Returns: GaussianEmissionHMM
         """
-        A = self.f_transmat()
+        mat_gen = {
+            self.TRANSMAT_MOVE_MAX_2: self.mk_transmat2,
+            self.TRANSMAT_CONST_MOVE: self.mk_transmat1
+        }
+        A = mat_gen[which_transmat]()
         B = self.model_params[["level_mean", "level_stdv"]].values.tolist() #mu, std of each state
         pi = [1/float(self.nstates)] * self.nstates   # initial probabilities per state
         # generate model from parameters
         self.model = ghmm.HMMFromMatrices(self.emission_domain,
                                           ghmm.GaussianDistribution(self.emission_domain), A, B, pi)
-
 
     def mk_transmat1(self):
         """make a transition matrix assuming move=1"""
@@ -50,7 +55,6 @@ class HmmModel(object):
                 transmat[j, i] = p
 
         return transmat.tolist()
-
 
     def mk_transmat2(self):
         """
@@ -112,7 +116,6 @@ class Basecaller(object):
         """
 
         Args:
-            f5_files: list of fast5 files
             ncores: number of CPU cores used. If ncores is None, then cpu_count() is used.
             template_model: template model file
             complement_model: complement model file
@@ -169,7 +172,3 @@ class Basecaller(object):
             if complement:
                 header = "{0} {1}".format(file_path, "complement")
                 fw.write_entry(header, complement)
-
-
-
-

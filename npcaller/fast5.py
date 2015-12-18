@@ -39,12 +39,12 @@ def identify_events_path(fast5):
 
 class Fast5File(object):
     def __init__(self, path):
-        result = re.search(r'ch(\d+)_file(\d+)_', filename)
+        result = re.search(r'ch(\d+)_file(\d+)_', path)
         self.file_id = int(result.group(2))
         self.channel_id = int(result.group(1))
         try:
             self.f5 = h5py.File(path, 'r')
-            self.event_path = identify_events_path(f5)
+            self.event_path = identify_events_path(self.f5)
         except OSError:
             raise Fast5Exception("Unable to open fast5-file.")
 
@@ -90,6 +90,7 @@ class Fast5File(object):
                 ev["move"] = int(raw_ev[6])
                 yield ev
         except KeyError:
-            return None
+            pass
+
 
 
