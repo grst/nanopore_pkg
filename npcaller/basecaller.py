@@ -5,52 +5,92 @@ from multiprocessing import Pool
 import sys
 from npcaller.fasta import FastaWriter
 import numpy as np
+import itertools
 
-class ModelException:
+# The GHMM object cannot be pickled (SWIG object)
+# To use the multiprocessing library, a workaround is to save the objects in
+# global variables. This is ugly, but works for this application.
+template_model = None
+complement_model = None
+
+
+def call_file(file_path):
+    """
+    Execute basecalling on the given file.
+
+    This is the method called by the multiprocessing.Pool.map() and executed in
+    one worker thread. Should be part of the Basecaller class, but the
+    multiprocessing module does not allow that (Pickling error...)
+
+    Args:
+        file_path: path to fast5 file
+
+    Returns:
+        Tuple (file_path, template_sequence, complement_sequence)
+
+    """
+    template, complement = None, None
+    f5file = Fast5File(file_path)
+    template_events = f5file.get_corrected_events("template")
+    complement_events = f5file.get_corrected_events("complement")
+    if template_model and template_events:
+        means = [ev["mean"] for ev in template_events]
+        template = template_model.predict(means)
+    if complement_model and complement_events:
+        means = [ev["mean"] for ev in complement_events]
+        complement = complement_model.predict(means)
+    return file_path, template, complement
+
+
+class ModelException(Exception):
     pass
 
+
 class HmmModel(object):
-    TRANSMAT_CONST_MOVE = HmmModel.mk_transmat1
-    TRANSMAT_MOVE_MAX_2 = HmmModel.mk_transmat2
-    emission_domain = ghmm.Float() # emission domain for HMM
+    TRANSMAT_CONST_MOVE = 0
+    TRANSMAT_MOVE_MAX_2 = 2
+    emission_domain = ghmm.Float()      # emission domain for HMM
     model = None
 
-    def __init__(self, model_file, f_transmat=HmmModel.TRANSMAT_MOVE_MAX_2):
+    def __init__(self, model_file, which_transmat=TRANSMAT_MOVE_MAX_2):
         self.model_params = pickle.load(model_file)
-        self.nmers = len(self.model_params[["kmer"]][0])
+        self.nmers = len(self.model_params.ix[0, "kmer"])
+        self.all_kmers = self.model_params["kmer"].tolist()
         assert 4 ** self.nmers == len(self.model_params), "# model params do not match length of kmers"
         self.nstates = len(self.model_params)
-        self.init_model(f_transmat)
+        self.init_model(which_transmat)
 
-    def init_model(self, f_transmat):
+    def init_model(self, which_transmat):
         """
         Build a HMM according to the parameter File.
 
         The model is only based on the means of events. Stdv is not taken into account.
 
         Args:
-            f_transmat: function to construct the transition matrix
+            which_transmat: HmmModel.TRANSMAT_CONST_MOVE or HmmModel.TRANSMAT_MOVE_MAX_2
 
         Returns: GaussianEmissionHMM
         """
-        A = self.f_transmat()
-        B = self.model_params[["level_mean", "level_stdv"]].values.tolist() #mu, std of each state
+        mat_gen = {
+            self.TRANSMAT_MOVE_MAX_2: self.mk_transmat2,
+            self.TRANSMAT_CONST_MOVE: self.mk_transmat1
+        }
+        A = mat_gen[which_transmat]()
+        B = self.model_params[["level_mean", "level_stdv"]].values.tolist()  # mu, std of each state
         pi = [1/float(self.nstates)] * self.nstates   # initial probabilities per state
         # generate model from parameters
         self.model = ghmm.HMMFromMatrices(self.emission_domain,
                                           ghmm.GaussianDistribution(self.emission_domain), A, B, pi)
 
-
     def mk_transmat1(self):
         """make a transition matrix assuming move=1"""
         transmat = np.empty((self.nstates, self.nstates))
-        for j, from_kmer in enumerate(self.model_params[["kmer"]]):
-            for i, to_kmer in enumerate(self.model_params[["kmer"]]):
+        for j, from_kmer in enumerate(self.all_kmers):
+            for i, to_kmer in enumerate(self.all_kmers):
                 p = 1/4. if from_kmer[-(self.nmers-1):] == to_kmer[:(self.nmers-1)] else 0.
                 transmat[j, i] = p
 
         return transmat.tolist()
-
 
     def mk_transmat2(self):
         """
@@ -60,8 +100,8 @@ class HmmModel(object):
         them systematically.
         """
         transmat = np.empty((self.nstates, self.nstates))
-        for j, from_kmer in enumerate(self.model_params[["kmer"]]):
-            for i, to_kmer in enumerate(self.model_params[["kmer"]]):
+        for j, from_kmer in enumerate(self.all_kmers):
+            for i, to_kmer in enumerate(self.all_kmers):
                 p = 0
                 if from_kmer[-(self.nmers-2):] == to_kmer[:(self.nmers-2)]:
                     """move=2"""
@@ -86,7 +126,7 @@ class HmmModel(object):
             nucleotide sequence
 
         """
-        kmers = [self.model_params[["kmer"]][x] for x in states]
+        kmers = [self.model_params.ix[x, "kmer"] for x in states]
         seq = [kmer[0] for kmer in kmers] + [kmers[-1][1:]]
         return "".join(seq)
 
@@ -112,7 +152,6 @@ class Basecaller(object):
         """
 
         Args:
-            f5_files: list of fast5 files
             ncores: number of CPU cores used. If ncores is None, then cpu_count() is used.
             template_model: template model file
             complement_model: complement model file
@@ -129,23 +168,17 @@ class Basecaller(object):
         self.results = []
 
     def process_files(self, files):
-        def file_worker(file_path):
-            template, complement = None, None
-            f5file = Fast5File(file_path)
-            template_events = f5file.get_events("template")
-            complement_events = f5file.get_events("complement")
-            if self.template_model and template_events:
-                means = [ev["mean"] for ev in template_events]
-                template = self.template_model.predict(means)
-            if self.complement_model and complement_events:
-                means = [ev["mean"] for ev in complement_events]
-                complement = self.complement_model.predict(means)
-            return file_path, template, complement
+
+        # Global variables as workaround to share unpicklable objects with the worker threads.
+        global template_model
+        global complement_model
+        template_model = self.template_model
+        complement_model = self.complement_model
 
         p = Pool(self.ncores)
         try:
             print("Calling Files: ")
-            for i, res in enumerate(p.imap_unordered(file_worker, files), 1):
+            for i, res in enumerate(p.imap_unordered(call_file, files), 1):
                 self.results.append(res)
                 sys.stdout.write('\rdone {0:%}'.format(i/float(len(files))))
             p.close()
@@ -169,7 +202,3 @@ class Basecaller(object):
             if complement:
                 header = "{0} {1}".format(file_path, "complement")
                 fw.write_entry(header, complement)
-
-
-
-

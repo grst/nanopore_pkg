@@ -39,12 +39,12 @@ def identify_events_path(fast5):
 
 class Fast5File(object):
     def __init__(self, path):
-        result = re.search(r'ch(\d+)_file(\d+)_', filename)
+        result = re.search(r'ch(\d+)_file(\d+)_', path)
         self.file_id = int(result.group(2))
         self.channel_id = int(result.group(1))
         try:
             self.f5 = h5py.File(path, 'r')
-            self.event_path = identify_events_path(f5)
+            self.event_path = identify_events_path(self.f5)
         except OSError:
             raise Fast5Exception("Unable to open fast5-file.")
 
@@ -62,9 +62,9 @@ class Fast5File(object):
         assert strand in ["template", "complement"]
         attrs = ["shift", "scale", "drift"]
         try:
-            all_attrs = self.f5[self.event_path.format(strand) + "/Model"]
-            return {k: v for k, v in all_attrs.items() if k in attrs}
-        except KeyError:
+            all_attrs = self.f5[self.event_path.format(strand) + "/Model"].attrs
+            return {k: all_attrs[k] for k in attrs}
+        except (KeyError, ValueError):
             return None
 
     def get_events(self, strand):
@@ -74,7 +74,8 @@ class Fast5File(object):
         Args:
             strand: either "template" or "complement"
 
-        Returns: generator yielding one event-dict at a time or None if strand not in File
+        Returns:
+            generator yielding one event-dict at a time or None if strand not in File
 
         """
         assert strand in ["template", "complement"]
@@ -90,6 +91,36 @@ class Fast5File(object):
                 ev["move"] = int(raw_ev[6])
                 yield ev
         except KeyError:
-            return None
+            pass
+
+    def get_corrected_events(self, strand):
+        """
+        Get events for template/complement strand and apply the shift/scale/drift corrections.
+        Unfortunately, these corrections are not documented exactly anywhere. Some information is on
+        https://wiki.nanoporetech.com/display/BP/1D+Basecalling+overview.
+
+        Args:
+            strand: either "template" or "complement"
+
+        Returns:
+            generator yielding one event-dict at a time or None if strand not in File
+
+        """
+        attrs = self.get_attrs(strand)
+        if attrs is None:
+            raise Fast5Exception("events cannot be shift/scale/drift corrected.")
+
+        # apparently, drift is applied relatively to the start of the read.
+        read_start = next(self.get_events(strand))["start"]
+
+        shift = lambda mean: mean - attrs["shift"]
+        scale = lambda mean: mean / attrs["scale"]
+        drift = lambda mean, start: mean - (start - read_start) * attrs["drift"]
+
+        for ev in self.get_events(strand):
+            ev["mean"] = drift(scale(shift(ev["mean"])), ev["start"])
+            yield ev
+
+
 
 
