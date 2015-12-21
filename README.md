@@ -1,6 +1,11 @@
 ## Requirements
 required packages:
 h5py
-graphmap
 ghmm
 numpy
+pysam (for validation only)
+
+# tools
+graphmap
+poretools (for validation only)
+samtools

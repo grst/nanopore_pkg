@@ -2,6 +2,7 @@
 Since skbio and Biopython are overkill and slightly to complicated most of the time
 I came up with this really simple fasta-io class.
 """
+from itertools import groupby
 
 
 class FastaReader(object):
@@ -11,14 +12,20 @@ class FastaReader(object):
         else:
             self.file = file
 
-    def get_next_entry(self):
+    def get_entries(self):
         """
         Get the next Entry from the fasta file.
 
         Returns: Generator, which yields (header, sequence) tuples
 
         """
-        assert False, "not yet implemented."
+        groups = (x[1] for x in groupby(self.file, lambda line: line[0] == ">"))
+        for header in groups:
+            # drop the ">"
+            header = header.next()[1:].strip()
+            # join all sequence lines to one.
+            seq = "".join(s.strip() for s in groups.next())
+            yield header, seq
 
     def close(self):
         self.file.close()
