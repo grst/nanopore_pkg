@@ -19,13 +19,12 @@ class FastaReader(object):
         Returns: Generator, which yields (header, sequence) tuples
 
         """
-        groups = (x[1] for x in groupby(self.file, lambda line: line[0] == ">"))
-        for header in groups:
-            # drop the ">"
-            header = header.next()[1:].strip()
-            # join all sequence lines to one.
-            seq = "".join(s.strip() for s in groups.next())
-            yield header, seq
+        for isheader, group in groupby(self.file, lambda line: line[0] == ">"):
+            if isheader:
+                header = next(group)[1:]
+            else:
+                seq = "".join(line.strip() for line in group)
+                yield header, seq
 
     def close(self):
         self.file.close()

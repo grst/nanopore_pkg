@@ -1,11 +1,14 @@
-from fasta import FastaReader, FastaWriter
+from npcaller.fasta import FastaReader, FastaWriter
 import random
 import pysam
-from subprocess import call
+from subprocess import call, check_output
 import math
+import numpy as np
 import csv
 import itertools
-from multiprocessing import Pool
+import tempfile
+from multiprocessing import Pool, cpu_count
+
 
 def randomize_fasta(fasta_in, fasta_out):
     """
@@ -27,14 +30,34 @@ def randomize_fasta(fasta_in, fasta_out):
     fw.close()
 
 
-def align_to_reference(fasta_file, ref_file, sam_file, graphmap_bin="graphmap", ncores="-1"):
+def filter_fasta(fasta_in, fasta_out, keyword):
+    """
+    read fasta_in, keep all sequences that contain the keyword in the header
+
+    Args:
+        fasta_in: path or file handle to fasta input file
+        fasta_out: path or file handle to fasta output file
+        keyword: filter criterion
+
+    """
+    fr = FastaReader(fasta_in)
+    fw = FastaWriter(fasta_out)
+    for header, seq in fr.get_entries():
+        if header.find(keyword) >= 0:
+            fw.write_entry(header, seq)
+    fr.close()
+    fw.close()
+
+
+def align_to_reference(fasta_file, ref_file, samfile_name, graphmap_bin="graphmap", ncores="-1"):
     """
     Align reads to the reference using graphmap.
+    Create SAM and BAM file. Sort and Index Samfiles.
 
     Args:
         fasta_file: fasta file with reads to align
         ref_file: fasta file with reference (genome) sequence
-        sam_file: output file
+        samfile_name: name of sam file
         graphmap_bin: path to graphmap binary
         ncores: number of cpu cores to use for alignment. If ncores=-1, ncores equals min(24, cpu_count()/2)
 
@@ -42,8 +65,25 @@ def align_to_reference(fasta_file, ref_file, sam_file, graphmap_bin="graphmap", 
     call([graphmap_bin,
           "-r", ref_file.name,
           "-d", fasta_file.name,
-          "-o", sam_file.name,
-          "-t", ncores])
+          "-o", samfile_name,
+          "-t", str(ncores)])
+
+
+def sam_to_bam(samfile, bamfile, samtools_bin="samtools"):
+    """
+    Convert SAM to sorted and indexed BAM.
+
+    Args:
+        samfile: Input Sam
+        bamfile: Output Bam
+        samtools_bin: path to samtools binary
+
+    """
+    with tempfile.NamedTemporaryFile() as tmp_bam:
+        # samtools takes only basename in 'sort' but full filename in 'index'
+        call(["{2} view -S -b {0} > {1}".format(samfile, tmp_bam.name, samtools_bin)], shell=True)
+        call([samtools_bin, "sort", tmp_bam.name, bamfile])
+        call([samtools_bin, "index", bamfile + ".bam"])
 
 
 def _mk_read_stats(samfile_path, read_id, total_reads, ref_seq, chunk):
@@ -56,18 +96,19 @@ def _mk_read_stats(samfile_path, read_id, total_reads, ref_seq, chunk):
     This should be part of AlignmentStats, but the native multiprocessing library does not allow that (pickling error)
 
     Args:
-        read: pysam.AlignedRead
+
     """
+    result = []
     samfile = pysam.AlignmentFile(samfile_path)
     # since reads can only be accessed though the generator, we have to skip those we are not interested in:
     generator = samfile.fetch()
     try:
         read = None
         for i in range(read_id):            # skip previous reads
-            read = generator.next()
+            read = next(generator)
 
         for i in range(chunk):              # process the reads of interest
-            read = generator.next()
+            read = next(generator)
 
             s = {
                 "read_len": read.get_tag("ZQ"),
@@ -87,10 +128,12 @@ def _mk_read_stats(samfile_path, read_id, total_reads, ref_seq, chunk):
             assert s["read_len"] >= s["mapped_nts"]
             assert s["aln_len"] >= s["mapped_nts"]
             assert len(read.query_sequence) == s["read_len"]
-            yield s
+            result.append(s)
 
     except StopIteration:
         pass
+
+    return result
 
 
 class AlignmentStats(object):
@@ -100,18 +143,18 @@ class AlignmentStats(object):
 
     SIGNIFICANCE = .05
 
-    def __init__(self,  sam_file, ref_seq, ncores=-1):
+    def __init__(self, bam_file, ref_seq, ncores=None):
         """
         Instantiate object and calculate statistics.
 
         Args:
-            sam_file (File): File handle of SAM-file
+            bam_file (File): File handle of BAM-file
             ref_seq (str): reference sequence
             ncores (int): # cpu cores
         """
-        self.ncores = ncores
-        self.sam_file = sam_file
-        self.pysam_file = pysam.AlignmentFile(sam_file.name)
+        self.ncores = cpu_count() if not ncores else ncores
+        self.bam_file = bam_file
+        self.pysam_file = pysam.AlignmentFile(bam_file.name)
         self.ref_seq = ref_seq
         self.file_stats = {}
         self.read_stats = []
@@ -123,6 +166,9 @@ class AlignmentStats(object):
     def e2p(e):
         """
         convert Evalue to Pvalue (of Alignment)
+
+        Args:
+            e: evalue
         """
         return 1-np.exp(-e)
 
@@ -130,28 +176,29 @@ class AlignmentStats(object):
         """
         Do the actual calculations...
         """
-        samtools_result = call(["samtools view {0} | grep -v '^#' | cut -f17 | cut -d':' -f3".format(
-            self.sam_file.name)], shell=True) # use samtools and shell tools to the the #lines and #total nts
-        self.file_stats["total_reads"] =  len(samtools_result),   #for some reason pysam.unmapped does not work...
-        self.file_stats["mapped_reads"] =  self.pysam_file.mapped,
+        samtools_result = check_output(["samtools view {0} | grep -v '^#' | cut -f17 | cut -d':' -f3".format(
+            self.bam_file.name)], shell=True)   # use samtools and shell tools to the the #lines and #total nts
+        samtools_result = samtools_result.decode("utf-8").strip().split("\n")
+        self.file_stats["total_reads"] = len(samtools_result)   # for some reason pysam.unmapped does not work...
+        self.file_stats["mapped_reads"] = self.pysam_file.mapped
         self.file_stats["total_nts"] = sum(int(x) for x in samtools_result)
 
-        chunk = int(math.ceil(self.file_stats["mapped_reads"]/float(self.ncores))) #chunk size for multiprocessing
+        chunk = int(math.ceil(self.file_stats["mapped_reads"]/float(self.ncores)))  # chunk size for multiprocessing
         p = Pool(self.ncores)
         try:
-            read_stats = p.map(_mk_read_stats,
-                               itertools.repeat(self.sam_file.name),
+            read_stats = p.starmap(_mk_read_stats, zip(
+                               itertools.repeat(self.bam_file.name),
                                range(0, self.file_stats["mapped_reads"], chunk),
                                itertools.repeat(self.file_stats["total_reads"]),
                                itertools.repeat(self.ref_seq),
-                               itertools.repeat(chunk))
+                               itertools.repeat(chunk)))
             p.close()
+            self.read_stats = list(itertools.chain(*read_stats))
+
         except KeyboardInterrupt:
             p.terminate()
 
-        self.read_stats = list(itertools.chain(*read_stats))
-
-     def sumstat(self, stat):
+    def sumstat(self, stat):
         """
         sum of the stat <stat> for all reads.
 

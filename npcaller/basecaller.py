@@ -1,3 +1,4 @@
+from __future__ import print_function
 import pickle
 import ghmm
 from npcaller.fast5 import Fast5File
@@ -5,7 +6,6 @@ from multiprocessing import Pool
 import sys
 from npcaller.fasta import FastaWriter
 import numpy as np
-import itertools
 
 # The GHMM object cannot be pickled (SWIG object)
 # To use the multiprocessing library, a workaround is to save the objects in
@@ -150,13 +150,10 @@ class HmmModel(object):
 class Basecaller(object):
     def __init__(self, ncores=None, template_model=None, complement_model=None):
         """
-
         Args:
             ncores: number of CPU cores used. If ncores is None, then cpu_count() is used.
             template_model: template model file
             complement_model: complement model file
-
-        Returns:
 
         """
         if template_model is None and complement_model is None:
@@ -168,7 +165,13 @@ class Basecaller(object):
         self.results = []
 
     def process_files(self, files):
+        """
+        Execute multi-threaded basecalling on a list of fast5-files
 
+        Args:
+            files: list of paths to fast5 files
+
+        """
         # Global variables as workaround to share unpicklable objects with the worker threads.
         global template_model
         global complement_model
@@ -181,10 +184,12 @@ class Basecaller(object):
             for i, res in enumerate(p.imap_unordered(call_file, files), 1):
                 self.results.append(res)
                 sys.stdout.write('\rdone {0:%}'.format(i/float(len(files))))
+                sys.stdout.flush()
             p.close()
             p.join()
         except KeyboardInterrupt:
             p.terminate()
+            raise KeyboardInterrupt
 
     def write_to_fasta(self, output_file):
         """
