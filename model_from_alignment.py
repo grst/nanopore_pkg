@@ -5,15 +5,16 @@ from npcaller.fast5 import Fast5File
 from npcaller.validator import align_to_reference, sam_to_bam
 from tempfile import NamedTemporaryFile
 from pysam import AlignmentFile
+import numpy as np
+import pandas
 import logging
-from itertools import chain
-logger = logging.getLogger("alignment")
-logger.setLevel(logging.INFO)
-
+from multiprocessing import Pool
+import itertools
+import pickle
+logging.basicConfig(level=logging.INFO)
 
 class AlignmentEndException(Exception):
     pass
-
 
 class ModelMaker(object):
     """
@@ -38,6 +39,9 @@ class ModelMaker(object):
         self.k = k
         self.graphmap_bin = graphmap_bin
 
+        self.logger = logging.getLogger("alignment")
+        self.logger.setLevel(logging.NOTSET)
+
         fr = FastaReader(ref_file)
         _, self.ref_seq = next(fr.get_entries())
 
@@ -45,54 +49,136 @@ class ModelMaker(object):
         filelist = [l.strip() for l in filelist.readlines()]
         for file in filelist:
             f5file = Fast5File(file)
-            self.f5files[f5file.get_id(), f5file]
+            self.f5files[f5file.get_id()] = f5file
 
-        self.alignment = self.make_bam()
+    def make_all_models(self):
+        """
+        Make the models for both template and complement.
+        """
+        for strand in ["template", "complement"]:
+            self.make_model(strand)
 
-        self.find_correct_kmers()
+    def make_model(self, strand):
+        """
+        Runner function: make the model for either template or complement strand.
+        Pickles the model to {basename}.strand.pickle.
+        Args:
+            strand:
 
-        self.make_model()
+        Returns:
 
-    def make_bam(self):
-        with NamedTemporaryFile() as fasta_file:
+        """
+        self.logger.info("Making model for {0}-strand".format(strand))
+        alignment = self._make_bam(strand)
+        correct_kmers = self._find_correct_kmers(alignment, strand)
+        model = self._make_stats(correct_kmers)
+        pickle.dump(model, open("{0}.{1}.{2}".format(self.model_basename, strand, "pickle"), 'wb'))
+
+    def _make_bam(self, strand):
+        """
+        Extract sequences from fast5 files and map them to the reference sequence
+
+        Args:
+            strand: either template or complement
+
+        Returns:
+            AlignmentFile object of the generated bam-Alignment
+
+        """
+        # with NamedTemporaryFile() as fasta_file:
+        with NamedTemporaryFile('w') as fasta_file:
             samfile = self.model_basename + ".sam"
             bamfile = self.model_basename
             fw = FastaWriter(fasta_file)
             for f5file in self.f5files.values():
-                fw.write_entry(f5file.get_id(), Fast5File.get_seq("template"))
+                header = f5file.get_id()
+                seq = f5file.get_seq(strand)
+                fw.write_entry(header, seq)
             fw.flush()
             align_to_reference(fasta_file, self.ref_file, samfile,
                                graphmap_bin=self.graphmap_bin, ncores=self.ncores)
             sam_to_bam(samfile, bamfile)
 
-        return AlignmentFile(bamfile)
+        return AlignmentFile(bamfile + ".bam")
 
-    def find_correct_kmers(self):
+    def _find_correct_kmers(self, alignment, strand):
+        """
+
+        Args:
+            alignment (AlignmentFile): Pysam Object of the bam-Alignment
+            strand (str): either template or complement
+
+        Returns:
+            list of correctly mapped events.
+        """
         total_events = 0
         result = list()
-        reads = [x for x in self.alignment.fetch()]
-        logger.info("{0} reads found in alignment".format(len(reads)))
+        reads = [x for x in alignment.fetch()]
+        self.logger.info("{0} reads found in alignment".format(len(reads)))
         for read in reads:
             f5file = self.f5files[read.query_name]
             pairs = [list(t) for t in zip(*read.get_aligned_pairs())]
             assert(pairs[0][0] == 0), "alignment is not null-indexed."
-            correct, total = self._process_events(f5file, pairs)
+            correct, total = self._process_events(f5file, pairs, strand)
             total_events += total
             result.append(correct)
 
-        true_events = list(chain.from_iterable([r.get() for r in result]))
-        logger.info("Identified {0} correct kmers of {1} total kmers. That's {2:%}".format(
-            true_events, total_events, true_events/total_events
+#        true_events = list(chain.from_iterable([r.get() for r in result]))
+        correct_events = [x for x in itertools.chain.from_iterable(result)]
+        self.logger.info("Identified {0} correct kmers of {1} total kmers. That's {2:%}".format(
+            len(correct_events), total_events, len(correct_events)/total_events
         ))
+        return correct_events
 
-    def make_model(self):
-        pass
+    def _make_stats(self, correct_events):
+        """
+        sort the events into their respective kmer-buckets and calculate the target
+        statistics (mean, sd) for the model
 
-    def _process_events(self, f5file, pairs):
+        Args:
+            correct_events (list): list of correctly mapped events
+
+        Returns:
+            Pandas Dataframe containing the model
+
+        """
+        self.logger.info("started calculating statistics")
+        all_kmers = ["".join(i) for i in itertools.product("ACGT", repeat=self.k)]
+        stat_map = {}
+        for attr in ["mean", "stdv"]:
+            stat_map[attr] = {kmer: [] for kmer in all_kmers}
+            for ev in correct_events:
+                stat_map[attr][ev["kmer"]].append(ev[attr])
+
+        # make model file
+        model = []
+        for kmer in all_kmers:
+            model.append({
+                "kmer": kmer,
+                "level_mean": np.mean(stat_map["mean"][kmer]),
+                "level_stdv": np.std(stat_map["mean"][kmer]),
+                "sd_mean": np.mean(stat_map["stdv"][kmer]),
+                "sd_stdv": np.std(stat_map["stdv"][kmer]),
+                "weight": 1000.0  # not implemented in this model, use neutral value
+            })
+        return pandas.DataFrame(model)
+
+    def _process_events(self, f5file, pairs, strand):
+        """
+        Helper function which processes the events per f5file.
+
+        Args:
+            f5file (Fast5File):
+            pairs (list): list of pairs (read nt <-> ref nt)
+            strand: either template or complement
+
+        Returns:
+            correctly mapped events of the given file.
+
+        """
         i_seq = 0
         correct = list()
         total = 0
-        strand = "template"
         called_seq = f5file.get_seq(strand)
         for ev in f5file.get_corrected_events(strand):
             total += 1
@@ -105,7 +191,7 @@ class ModelMaker(object):
             read_kmer = self._get_nt_kmer(ev_index, pairs[0], called_seq)
             assert(read_kmer == ev["kmer"]), (i_seq, ev, read_kmer, ev_index)
             if self._is_correct_kmer(ev_index, pairs, called_seq):
-                ev["ref_position"] = pairs[1][ev_index[0]] #first position of kmer in reference
+                ev["ref_position"] = pairs[1][ev_index[0]]  # first position of kmer in reference
                 correct.append(ev)
         return correct, total
 
@@ -183,10 +269,7 @@ class ModelMaker(object):
 if __name__ == "__main__":
     argp = argparse.ArgumentParser("Align processed reads from metrichor to reference; "
                                    "extract correct kmers and calculate mean and stdv for the model. "
-                                   "Only data from 2D reads is used."
-                                   ""
-                                   "Warning. This script loads all fast5-files to RAM. Ensure that you have enough "
-                                   "or do not use all the data. ")
+                                   "Only data from 2D reads is used.")
     argp.add_argument("-f", "--filelist", required=True, type=argparse.FileType('r'),
                       help="a list of fast5 files to be aligned, one per line")
     argp.add_argument("-r", "--reference", required=True, type=argparse.FileType('r'),
@@ -201,4 +284,5 @@ if __name__ == "__main__":
                        help="Path to graphmap alignment tool")
 
     args = argp.parse_args()
-    ModelMaker(args.filelist, args.reference, args.output, args.ncores, args.kmer, args.graphmap)
+    mm = ModelMaker(args.filelist, args.reference, args.output, args.ncores, args.kmer, args.graphmap)
+    mm.make_all_models()

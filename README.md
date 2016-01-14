@@ -3,6 +3,7 @@ required packages:
 h5py
 ghmm
 numpy
+pandas
 pysam (for validation only)
 
 # tools

@@ -4,8 +4,24 @@ toolbox for handling fast5 (hdf5) files.
 
 import h5py
 import re
-import lazy
 
+class lazy_property(object):
+    '''
+    meant to be used for lazy evaluation of an object attribute.
+    property should represent non-mutable data, as it replaces itself.
+    '''
+
+    def __init__(self,fget):
+        self.fget = fget
+        self.func_name = fget.__name__
+
+
+    def __get__(self,obj,cls):
+        if obj is None:
+            return None
+        value = self.fget(obj)
+        setattr(obj,self.func_name,value)
+        return value
 
 class Fast5Exception(Exception):
     pass
@@ -43,6 +59,10 @@ class Fast5File(object):
         result = re.search(r'ch(\d+)_file(\d+)_', path)
         self.file_id = int(result.group(2))
         self.channel_id = int(result.group(1))
+        self.seqs = {
+            "template": None,
+            "complement": None
+        }
         try:
             self.f5 = h5py.File(path, 'r')
             self.event_path = identify_events_path(self.f5)
@@ -75,7 +95,6 @@ class Fast5File(object):
             return None
 
     def get_events(self, strand):
-        assert strand in ["template", "complement"]
         """
         Get events for template/complement strand
 
@@ -130,10 +149,11 @@ class Fast5File(object):
             ev["mean"] = drift(scale(shift(ev["mean"])), ev["start"])
             yield ev
 
-    @lazy
     def get_seq(self, strand):
         """
-        convert the events to the NT-sequence of the read.
+        get the nt-sequence, based on the kmers and 'move'.
+        Evaluation is done in a lazy fashion. If the function
+        was called once, the sequence can be accessed in constant time.
 
         Args:
             strand (str): either template or complement
@@ -142,7 +162,10 @@ class Fast5File(object):
             (str) nucleotide sequence
 
         """
-        return self.events2seq(self.get_events(strand))
+        assert strand in ["template", "complement"]
+        if self.seqs[strand] is None:
+            self.seqs[strand] = self.events2seq(self.get_events(strand))
+        return self.seqs[strand]
 
     @staticmethod
     def events2seq(events):
