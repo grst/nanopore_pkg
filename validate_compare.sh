@@ -2,7 +2,7 @@
 export HDF5_DISABLE_VERSION_CHECK=2
 FAST5_LIST="test/input_files/fast5/loman100.txt" # path to fast5 files
 FASTA_OUTPUT="test/output_files/fasta"
-STATS_OUTPUT="test/output_files/stats"
+STATS_OUTPUT="test/output_files/stats2"
 REF="/storageNGS/ngs3/projects/other/Nanopore/PublicData/LomanLab_MAP-006/ecoli_mg1655.fa"
 GRAPHMAP=/home/ibis/gregor.sturm/nanopore/tools/graphmap/graphmap
 mkdir -p $FASTA_OUTPUT
@@ -10,9 +10,12 @@ mkdir -p $STATS_OUTPUT
 
 
 ## Basecalling
-./basecall.py --template test/output_files/models/model6-1.template_median68pA.pickle \
-    --complement test/output_files/models/model6-1.complement_median68pA_pop2.pickle \
+./basecall.py --template test/output_files/models/model_from_alignment01.template.pickle \
+    --complement test/output_files/models/model_from_alignment01.complement.pickle \
     --filelist $FAST5_LIST --output $FASTA_OUTPUT/called.fa
+#./basecall.py --template test/output_files/models/model6-1.template_median68pA.pickle \
+#    --complement test/output_files/models/model6-1.complement_median68pA_pop2.pickle \
+#    --filelist $FAST5_LIST --output $FASTA_OUTPUT/called.fa
 
 ## Convert metrichor basecalling to fasta
 cat $FAST5_LIST | xargs poretools fasta > $FASTA_OUTPUT/metrichor.fa 

@@ -13,8 +13,10 @@ import itertools
 import pickle
 logging.basicConfig(level=logging.INFO)
 
+
 class AlignmentEndException(Exception):
     pass
+
 
 class ModelMaker(object):
     """
@@ -72,7 +74,7 @@ class ModelMaker(object):
         alignment = self._make_bam(strand)
         correct_kmers = self._find_correct_kmers(alignment, strand)
         model = self._make_stats(correct_kmers)
-        pickle.dump(model, open("{0}.{1}.{2}".format(self.model_basename, strand, "pickle"), 'wb'))
+        pickle.dump(model, open("{0}.{1}.{2}".format(self.model_basename, strand, "pickle"), 'wb'), protocol=2)
 
     def _make_bam(self, strand):
         """
