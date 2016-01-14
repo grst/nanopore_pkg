@@ -4,6 +4,7 @@ toolbox for handling fast5 (hdf5) files.
 
 import h5py
 import re
+import lazy
 
 
 class Fast5Exception(Exception):
@@ -48,6 +49,12 @@ class Fast5File(object):
         except OSError:
             raise Fast5Exception("Unable to open fast5-file.")
 
+    def get_id(self):
+        """
+        Returns: unique identifier for f5 file.
+        """
+        return "ch_{0}_file_{1}".format(self.channel_id, self.file_id)
+
     def get_attrs(self, strand):
         """
         Get Attributes for template/complement strand
@@ -68,6 +75,7 @@ class Fast5File(object):
             return None
 
     def get_events(self, strand):
+        assert strand in ["template", "complement"]
         """
         Get events for template/complement strand
 
@@ -106,6 +114,7 @@ class Fast5File(object):
             generator yielding one event-dict at a time or None if strand not in File
 
         """
+        assert strand in ["template", "complement"]
         attrs = self.get_attrs(strand)
         if attrs is None:
             raise Fast5Exception("events cannot be shift/scale/drift corrected.")
@@ -121,6 +130,33 @@ class Fast5File(object):
             ev["mean"] = drift(scale(shift(ev["mean"])), ev["start"])
             yield ev
 
+    @lazy
+    def get_seq(self, strand):
+        """
+        convert the events to the NT-sequence of the read.
 
+        Args:
+            strand (str): either template or complement
+
+        Returns:
+            (str) nucleotide sequence
+
+        """
+        return self.events2seq(self.get_events(strand))
+
+    @staticmethod
+    def events2seq(events):
+        """turn events into a nt sequence based on the 'move' column
+
+        Args:
+            events: list of events (dictionaries)
+        """
+        seq = list()
+        seq.append(next(events)["kmer"])
+        for ev in events:
+            move = ev["move"]
+            kmer = ev["kmer"]
+            seq.append(kmer[len(kmer)-move:])
+        return "".join(seq)
 
 

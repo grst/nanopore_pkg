@@ -75,7 +75,7 @@ def sam_to_bam(samfile, bamfile, samtools_bin="samtools"):
 
     Args:
         samfile: Input Sam
-        bamfile: Output Bam
+        bamfile: Output Bam (without .bam extension)
         samtools_bin: path to samtools binary
 
     """

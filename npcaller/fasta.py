@@ -55,6 +55,9 @@ class FastaWriter(object):
         for s in sequence:
             self.file.write(s + "\n")
 
+    def flush(self):
+        self.file.flush()
+
     def close(self):
         self.file.close()
 
