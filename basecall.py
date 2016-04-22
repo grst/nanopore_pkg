@@ -17,8 +17,10 @@ if __name__ == "__main__":
                       help="a list of fast5 files to be called, one per line")
     argp.add_argument("-o", "--output", required=True, type=argparse.FileType('w'),
                       help="fasta file with the called reads")
-    argp.add_argument("-t", "--template", required=False, type=argparse.FileType('rb'))
-    argp.add_argument("-c", "--complement", required=False, type=argparse.FileType('rb'))
+    argp.add_argument("-t", "--template", required=False, type=argparse.FileType('rb'),
+                      help="path to template model")
+    argp.add_argument("-c", "--complement", required=False, type=argparse.FileType('rb'),
+                      help="path to complement model")
     argp.add_argument("-n", "--ncores", required=False, type=int, default=None,
                       help="#CPU cores")
 
