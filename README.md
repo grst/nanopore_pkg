@@ -13,12 +13,14 @@ required packages:
 ghmm
 numpy
 pandas
-pysam (for validation only)```
+pysam (for validation only)
+```
 
-### tools
-graphmap
+required tools:
+```graphmap
 poretools (for validation only)
 samtools
+```
 
 ## Documentation
 check documentation.pdf for more information. 
